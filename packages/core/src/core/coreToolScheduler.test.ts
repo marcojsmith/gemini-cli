@@ -288,7 +288,14 @@ function createMockConfig(overrides: Partial<Config> = {}): Config {
     getMessageBus: () => createMockMessageBus(),
     getEnableHooks: () => false,
     getHookSystem: () => undefined,
-    getExperiments: () => {},
+    getExperiments: () => ({ flags: {}, experimentIds: [] }),
+    getProjectRoot: () => '.',
+    getLspSettings: () => ({
+      lintEnabled: true,
+      lintCommand: 'eslint',
+      typeCheckEnabled: true,
+      typeCheckCommand: 'tsc',
+    }),
   } as unknown as Config;
 
   // eslint-disable-next-line @typescript-eslint/no-misused-spread
