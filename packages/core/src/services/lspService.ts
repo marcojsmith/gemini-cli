@@ -34,12 +34,19 @@ export class LspService {
     this.projectRoot = config.getProjectRoot ? config.getProjectRoot() : '.';
   }
 
+  getConfig(): Config {
+    return this.config;
+  }
+
   private async computeFileHash(filePath: string): Promise<string> {
     try {
       const absolutePath = path.resolve(this.projectRoot, filePath);
       const stat = await fs.promises.stat(absolutePath);
       return `${absolutePath}:${stat.mtimeMs}:${stat.size}`;
     } catch {
+      // Fallback: use filePath with current timestamp when stat fails.
+      // This can happen if the file doesn't exist yet or was recently deleted.
+      // Using Date.now() ensures a unique hash for retry attempts.
       return `${filePath}:${Date.now()}`;
     }
   }
@@ -105,6 +112,21 @@ export class LspService {
       return this.tsgoDetected;
     }
 
+    // First, check if tsgo is available in PATH using 'which' command
+    try {
+      const { stdout } = await spawnAsync('which', ['tsgo'], {
+        cwd: this.projectRoot,
+      });
+      if (stdout.trim()) {
+        this.tsgoDetected = true;
+        debugLogger.debug('tsgo detected in PATH:', stdout.trim());
+        return true;
+      }
+    } catch {
+      // tsgo not found in PATH, continue to check local paths
+    }
+
+    // Fall back to checking common local paths in node_modules
     const possiblePaths = [
       path.join(this.projectRoot, 'node_modules', '.bin', 'tsgo'),
       path.join(this.projectRoot, 'node_modules', 'tsgo', 'bin', 'tsgo.js'),
@@ -294,7 +316,10 @@ export class LspService {
         const output = await this.runCommand(lspSettings.lintCommand, '.');
         results.lint = this.parseDiagnostics(output, '.');
       } catch (error) {
-        debugLogger.debug('Project lint failed:', error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        debugLogger.debug(
+          `Project lint command '${lspSettings.lintCommand}' failed: ${errorMsg}`,
+        );
       }
     }
 
@@ -315,7 +340,10 @@ export class LspService {
         const output = await this.runCommand(typeCmd, '.');
         results.types = this.parseDiagnostics(output, '.');
       } catch (error) {
-        debugLogger.debug('Project type check failed:', error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        debugLogger.debug(
+          `Project type check command '${lspSettings.typeCheckCommand}' failed: ${errorMsg}`,
+        );
       }
     }
 
@@ -418,7 +446,10 @@ export class LspService {
         );
         diagnostics.push(...this.parseDiagnostics(lintResults, filePath));
       } catch (error) {
-        debugLogger.debug('LSP linting failed:', error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        debugLogger.debug(
+          `LSP lint command '${lspSettings.lintCommand}' failed for '${filePath}': ${errorMsg}`,
+        );
       }
     }
 
@@ -433,10 +464,19 @@ export class LspService {
           debugLogger.debug('Using tsgo for faster type checking');
         }
 
+        // Special handling for tsc: remove --project if targeting a single file
+        if (typeCmd.includes('tsc') && filePath !== '.') {
+          typeCmd = typeCmd.replace(/--project\s+\S+/, '');
+          typeCmd = typeCmd.replace(/-p\s+\S+/, '');
+        }
+
         const typeCheckResults = await this.runCommand(typeCmd, filePath);
         diagnostics.push(...this.parseDiagnostics(typeCheckResults, filePath));
       } catch (error) {
-        debugLogger.debug('LSP type checking failed:', error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        debugLogger.debug(
+          `LSP type check command '${lspSettings.typeCheckCommand}' failed for '${filePath}': ${errorMsg}`,
+        );
       }
     }
 
@@ -486,6 +526,7 @@ export class LspService {
     try {
       const { stdout, stderr } = await spawnAsync(resolvedCmd, filteredArgs, {
         cwd: this.projectRoot,
+        sandboxManager: this.config.sandboxManager,
       });
       return stdout + stderr;
     } catch (error: unknown) {
@@ -507,9 +548,12 @@ export class LspService {
 
     const absoluteTargetPath = path.resolve(this.projectRoot, targetFilePath);
 
-    // Common formats (ESLint, TSC)
-    const patterns = [
-      // TSC format: file.ts(10,5): error TS1234: message
+    const lspSettings = this.config.getLspSettings
+      ? this.config.getLspSettings()
+      : null;
+    const customPatterns = lspSettings?.diagnosticPatterns;
+
+    const defaultPatterns = [
       {
         regex:
           /^(.*?)\((\d+),(\d+)\): (err|error|warn|warning|info) (.*?): (.*)$/,
@@ -520,7 +564,6 @@ export class LspService {
         codeIdx: 5,
         messageIdx: 6,
       },
-      // ESLint format or similar: file.ts:10:5: error message
       {
         regex: /^(.*?):(\d+):(\d+): (err|error|warn|warning|info) (.*)$/,
         fileIdx: 1,
@@ -529,7 +572,16 @@ export class LspService {
         severityIdx: 4,
         messageIdx: 5,
       },
-      // Generic format: file.ts: line 10, col 5, Error - message
+      {
+        regex:
+          /^(.*?):(\d+):(\d+)\s+-\s+(err|error|warn|warning|info)\s+(.*?):\s+(.*)$/,
+        fileIdx: 1,
+        lineIdx: 2,
+        colIdx: 3,
+        severityIdx: 4,
+        codeIdx: 5,
+        messageIdx: 6,
+      },
       {
         regex:
           /^(.*?): line (\d+), col (\d+), (err|error|warn|warning|info) - (.*)$/i,
@@ -539,7 +591,6 @@ export class LspService {
         severityIdx: 4,
         messageIdx: 5,
       },
-      // ESLint stylish format:   10:5  error  message
       {
         regex: /^\s+(\d+):(\d+)\s+(err|error|warn|warning|info)\s+(.*)$/,
         lineIdx: 1,
@@ -548,6 +599,18 @@ export class LspService {
         messageIdx: 4,
       },
     ];
+
+    const patterns = customPatterns
+      ? customPatterns.map((p) => ({
+          regex: new RegExp(p.regex),
+          fileIdx: p.fileIdx,
+          lineIdx: p.lineIdx,
+          colIdx: p.colIdx,
+          severityIdx: p.severityIdx,
+          codeIdx: p.codeIdx,
+          messageIdx: p.messageIdx,
+        }))
+      : defaultPatterns;
 
     for (const line of lines) {
       // Check if line looks like a filename (absolute or relative, not starting with space)

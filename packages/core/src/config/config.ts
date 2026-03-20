@@ -214,6 +214,18 @@ export interface LspSettings {
   runOnEdit?: boolean;
   /** Allow running diagnostics on demand via commands (default: true) */
   runOnDemand?: boolean;
+  /** Debounce delay in ms for LSP diagnostics (default: 1000) */
+  debounceDelay?: number;
+  /** Custom regex patterns for parsing diagnostics. If not provided, default patterns for ESLint and TSC are used. */
+  diagnosticPatterns?: Array<{
+    regex: string;
+    fileIdx?: number;
+    lineIdx: number;
+    colIdx: number;
+    severityIdx: number;
+    codeIdx?: number;
+    messageIdx: number;
+  }>;
 }
 
 export interface ToolOutputMaskingConfig {
@@ -969,6 +981,7 @@ export class Config implements McpContext, AgentLoopContext {
       maxDiagnostics: params.lsp?.maxDiagnostics ?? 10,
       runOnEdit: params.lsp?.runOnEdit ?? true,
       runOnDemand: params.lsp?.runOnDemand ?? true,
+      debounceDelay: params.lsp?.debounceDelay ?? 1000,
     };
 
     this.coreTools = params.coreTools;
@@ -1887,6 +1900,13 @@ export class Config implements McpContext, AgentLoopContext {
   }
 
   getLspSettings(): LspSettings {
+    if (!this.isTrustedFolder()) {
+      return {
+        ...this.lspSettings,
+        lintEnabled: false,
+        typeCheckEnabled: false,
+      };
+    }
     return this.lspSettings;
   }
 

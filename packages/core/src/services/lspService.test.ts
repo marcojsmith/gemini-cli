@@ -25,6 +25,9 @@ describe('LspService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockConfig = {
+      // getProjectRoot defaults to '/test/project' - suitable for most test cases
+      // where files are accessed relative to a test project directory.
+      // Override this in specific tests if testing different project root scenarios.
       getProjectRoot: vi.fn().mockReturnValue(projectRoot),
       getLspSettings: vi.fn().mockReturnValue({
         lintEnabled: true,
@@ -55,6 +58,44 @@ describe('LspService', () => {
       code: 'TS1234',
       message: "Property 'x' does not exist on type 'Y'.",
     });
+  });
+
+  it('should parse modern TSC error format', async () => {
+    const tscOutput = `file.ts:10:5 - error TS1234: Property 'x' does not exist on type 'Y'.`;
+    (spawnAsync as Mock).mockImplementation((cmd: string) => {
+      if (cmd.includes('tsc'))
+        return Promise.resolve({ stdout: tscOutput, stderr: '' });
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+
+    const diagnostics = await lspService.getDiagnostics('file.ts');
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      line: 10,
+      column: 5,
+      severity: 'error',
+      code: 'TS1234',
+      message: "Property 'x' does not exist on type 'Y'.",
+    });
+  });
+
+  it('should strip --project flag for single file type checks', async () => {
+    mockConfig.getLspSettings.mockReturnValue({
+      lintEnabled: false,
+      typeCheckEnabled: true,
+      typeCheckCommand: 'tsc --project tsconfig.json --noEmit',
+    });
+
+    (spawnAsync as Mock).mockResolvedValue({ stdout: '', stderr: '' });
+
+    await lspService.getDiagnostics('file.ts');
+
+    const lastCall = (spawnAsync as Mock).mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+    expect(lastCall![0]).not.toContain('--project');
+    expect(lastCall![0]).not.toContain('tsconfig.json');
+    expect(lastCall![1]).toContain('file.ts');
   });
 
   it('should parse ESLint error format', async () => {
